@@ -1,0 +1,4 @@
+name =  Sellers Discount
+description = Provides discount based on the author of the product node.
+core = 7.x
+
