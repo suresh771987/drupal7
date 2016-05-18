@@ -1,0 +1,318 @@
+<?php
+
+module_load_include('inc', 'commerce_discount', 'commerce_discount.rules');
+
+/**
+ * Rules action: Apply fixed amount discount.
+ */
+function discount_sellers_fixed_amount(EntityDrupalWrapper $wrapper, $discount_name) {
+  $discount_wrapper = entity_metadata_wrapper('commerce_discount', $discount_name);
+  $discount_price = $discount_wrapper->commerce_discount_offer->commerce_fixed_amount->value();
+  $discount_price['amount'] = -$discount_price['amount'];
+  $inline_conditions = $discount_wrapper->inline_conditions->value();
+  $discount_alter = FALSE;
+  foreach ($inline_conditions as $condition) {
+    if ($condition['condition_name'] == 'product_has_max_qty') {
+      $discount_alter = TRUE;
+      $sku = $condition['condition_settings']['products'];
+      $quantity = $condition['condition_settings']['qty'];
+      $operator = $condition['condition_settings']['operator'];
+    }
+  }
+  switch ($wrapper->type()) {
+    case 'commerce_order':
+
+      // Exit if the wrapper doesn't have a commerce_discounts property.
+      if (!$wrapper->__isset('commerce_discounts')) {
+	return;
+      }
+
+      // Set reference to the discount.
+      // @todo: It doesn't work with the wrapper.
+      $order = $wrapper->value();
+
+      // If the discount will bring the order to less than zero, set the discount
+      // amount so that it stops at zero.
+      $order_amount = $wrapper->commerce_order_total->amount->value();
+      if (!$discount_alter) {
+	if (-$discount_price['amount'] > $order_amount) {
+	  $discount_price['amount'] = -$order_amount;
+	}
+      } else {
+	foreach ($wrapper->commerce_line_items as $wrapper_line_item) {
+	  $order_sku = $wrapper_line_item->line_item_label->value();
+	  if ($order_sku == $sku) {
+	    if (($operator == '==') && ($wrapper_line_item->quantity->value() == $quantity)) {
+	      $discount_price['amount'] = $quantity * $discount_price['amount'];
+	    }
+
+	    if (($operator == '>=') && ($wrapper_line_item->quantity->value() >= $quantity)) {
+	      $discount_price['amount'] = $quantity * $discount_price['amount'];
+	    }
+	    if (($operator == '<=') && ($wrapper_line_item->quantity->value() <= $quantity)) {
+	      $discount_price['amount'] = $wrapper_line_item->quantity->value() * $discount_price['amount'];
+	    }
+	  }
+	}
+      }
+
+      $delta = $wrapper->commerce_discounts->count();
+      $order->commerce_discounts[LANGUAGE_NONE][$delta]['target_id'] = $discount_wrapper->discount_id->value();
+      // Modify the existing discount line item or add a new one if that fails.
+      if (!commerce_discount_set_existing_line_item_price($wrapper, $discount_name, $discount_price)) {
+	commerce_discount_add_line_item($wrapper, $discount_name, $discount_price);
+      }
+
+      // Update the total order price, for the next rules condition (if any).
+      commerce_order_calculate_total($order);
+      break;
+
+    case 'commerce_line_item':
+      // Check whether this discount was already added as a price component.
+      $price_data = $wrapper->commerce_unit_price->data->value();
+
+      foreach ($price_data['components'] as $component) {
+	if (!empty($component['price']['data']['discount_name']) && $component['price']['data']['discount_name'] == $discount_wrapper->getIdentifier()) {
+	  return;
+	}
+      }
+
+      // Do not allow negative line item totals.
+      $line_item_amount = $wrapper->commerce_unit_price->amount->value();
+      if (-$discount_price['amount'] > $line_item_amount) {
+	$discount_price['amount'] = -$line_item_amount;
+      }
+
+      commerce_discount_add_price_component($wrapper, $discount_name, $discount_price);
+      break;
+  }
+}
+
+/**
+ * Rules action: Apply percentage discount.
+ */
+function discount_sellers_percentage(EntityDrupalWrapper $wrapper, $discount_name) {
+  $discount_wrapper = entity_metadata_wrapper('commerce_discount', $discount_name);
+  $rate = $discount_wrapper->commerce_discount_offer->commerce_percentage->value();
+  // Get the line item types to apply the discount to.
+  $line_item_types = variable_get('commerce_discount_line_item_types', array('product' => 'product'));
+
+  if ($rate > 1) {
+    $rate = $rate / 100;
+  }
+  
+    $inline_conditions = $discount_wrapper->inline_conditions->value();
+  $discount_alter = FALSE;
+  foreach ($inline_conditions as $condition) {
+    if ($condition['condition_name'] == 'product_has_max_qty') {
+      $discount_alter = TRUE;
+      $sku = $condition['condition_settings']['products'];
+      $quantity = $condition['condition_settings']['qty'];
+      $operator = $condition['condition_settings']['operator'];
+    }
+  }
+
+  switch ($wrapper->type()) {
+    case 'commerce_order':
+
+      // Exit if there are no line items or the wrapper doesn't contain
+      // the commerce_discounts property.
+      if (!$wrapper->commerce_line_items->value() || !$wrapper->__isset('commerce_discounts')) {
+	return;
+      }
+
+      // Set reference to the discount.
+      // @todo: It doesn't work with the wrapper.
+      $order = $wrapper->value();
+      $delta = $wrapper->commerce_discounts->count();
+      $order->commerce_discounts[LANGUAGE_NONE][$delta]['target_id'] = $discount_wrapper->discount_id->value();
+
+      $calculated_discount = 0;
+      // Loop the line items of the order and calculate the total discount.
+      foreach ($wrapper->commerce_line_items as $line_item_wrapper) {
+	if(!$discount_alter){
+	if (!empty($line_item_types[$line_item_wrapper->type->value()])) {
+	  $line_item_total = commerce_price_wrapper_value($line_item_wrapper, 'commerce_total', TRUE);
+	  $calculated_discount += $line_item_total['amount'] * $rate;
+	}
+	}
+	else
+	{
+	  	  $order_sku = $line_item_wrapper->line_item_label->value();
+		   $line_item_total = commerce_price_wrapper_value($line_item_wrapper, 'commerce_total', TRUE);
+	  if ($order_sku == $sku) {
+	    $product = commerce_product_load_by_sku($sku);
+	    if (($operator == '==') && ($line_item_wrapper->quantity->value() == $quantity)) {
+	      $calculated_discount = $quantity * $product->commerce_price[LANGUAGE_NONE][0]['amount'] * $rate;
+	    }
+	    if (($operator == '>=') && ($line_item_wrapper->quantity->value() >= $quantity)) {
+	      $calculated_discount = $quantity * $product->commerce_price[LANGUAGE_NONE][0]['amount'] * $rate;
+	    }
+	    if (($operator == '<=') && ($line_item_wrapper->quantity->value() <= $quantity)) {
+	      $calculated_discount = $line_item_wrapper->quantity->value() * $product->commerce_price[LANGUAGE_NONE][0]['amount'] * $rate;
+	    }
+	  }
+	}
+      }
+
+      if ($calculated_discount) {
+	$discount_amount = array(
+	    'amount' => $calculated_discount * -1,
+	    'currency_code' => $wrapper->commerce_order_total->currency_code->value(),
+	);
+
+	// Modify the existing discount line item or add a new one if that fails.
+	if (!commerce_discount_set_existing_line_item_price($wrapper, $discount_name, $discount_amount)) {
+	  commerce_discount_add_line_item($wrapper, $discount_name, $discount_amount);
+	}
+
+	// Update the total order price, for the next rules condition (if any).
+	commerce_order_calculate_total($order);
+      }
+      break;
+
+    case 'commerce_line_item':
+      // Check if the line item is configured in the settings to apply the
+      // discount.
+      if (empty($line_item_types[$wrapper->type->value()])) {
+	return;
+      }
+
+      // Check whether this discount was already added as a price component.
+      $price_data = $wrapper->commerce_unit_price->data->value();
+      foreach ($price_data['components'] as $component) {
+	if (!empty($component['price']['data']['discount_name']) && $component['price']['data']['discount_name'] == $discount_name) {
+	  return;
+	}
+      }
+
+      $unit_price = commerce_price_wrapper_value($wrapper, 'commerce_unit_price', TRUE);
+      $calculated_discount = $unit_price['amount'] * $rate * -1;
+
+      $discount_amount = array(
+	  'amount' => $calculated_discount,
+	  'currency_code' => $unit_price['currency_code'],
+      );
+      commerce_discount_add_price_component($wrapper, $discount_name, $discount_amount);
+      break;
+  }
+}
+
+function discounts_alter_inline_conditions_info() {
+  $conditions = array();
+  $conditions['product_has_max_qty'] = array(
+      'label' => t('Product & Qty'),
+      'entity type' => 'commerce_order',
+      'callbacks' => array(
+	  'configure' => 'discounts_alter_product_has_max_qty_configure',
+	  'build' => 'discounts_alter_product_has_max_qty_build',
+      ),
+  );
+
+  return $conditions;
+}
+
+function discounts_alter_product_has_max_qty_configure(&$settings) {
+  $form = array();
+
+  $default_currency = commerce_currency_load(NULL);
+
+  $form['products'] = array(
+      '#type' => 'textfield',
+      '#title' => t('SKUs'),
+      '#title_display' => 'invisible',
+      '#default_value' => $settings['products'],
+      '#required' => TRUE,
+      '#maxlength' => 4096,
+      '#autocomplete_path' => 'commerce_product/autocomplete/commerce_product/0/0',
+//    '#element_validate' => array('commerce_product_reference_autocomplete_validate'),
+//    '#suffix' => '<div class="condition-instructions">' . t('Select products when ordered make discount active.') . '</div>',
+      '#attributes' => array('placeholder' => array(t('enter product name'))),
+  );
+
+  $form['operator'] = array(
+      '#type' => 'select',
+      '#title' => t('Operator'),
+      '#title_display' => 'invisible',
+      '#options' => array(
+	  '==' => t('equal to'),
+	  '<=' => t('less than or equal to'),
+	  '>=' => t('greater than or equal to'),
+      ),
+      '#default_value' => !empty($settings['operator']) ? $settings['operator'] : '==',
+  );
+
+  $form['qty'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Quantity'),
+      '#default_value' => !empty($settings['qty']) ? $settings['qty'] : 0,
+      '#size' => 4,
+  );
+
+  return $form;
+}
+
+/**
+ * Implements hook_rules_condition_info().
+ *
+ * Adds new rule conditions to commerce_line_item entity type.
+ */
+function discounts_alter_rules_condition_info() {
+  return array(
+      'product_has_max_qty' => array(
+	  'label' => t('Products has max quantity'),
+	  'parameter' => array(
+	      'commerce_order' => array(
+		  'type' => 'commerce_order',
+		  'label' => t('Commerce Order'),
+		  'description' => t('Commerce order.'),
+		  'wrapped' => TRUE,
+	      ),
+	      'operator' => array(
+		  'type' => 'text',
+		  'label' => t('Operator'),
+		  'description' => t('Operator'),
+	      ),
+	      'products' => array(
+		  'type' => 'text',
+		  'label' => t('Product SKU(s)'),
+		  'description' => t('Products SKU to look for on the order. Enter a comma-separated list of product SKU(s).'),
+	      ),
+	      'qty' => array(
+		  'type' => 'text',
+		  'label' => t('Product Qty'),
+	      ),
+	  ),
+	  'module' => 'discounts_alter',
+	  'group' => t('Commerce Order'),
+	  'callbacks' => array(
+	      'execute' => 'discounts_alter_product_has_max_qty_build',
+	  ),
+      )
+  );
+}
+
+function discounts_alter_product_has_max_qty_build(EntityDrupalWrapper $wrapper, $operator, $products, $qty) {
+  $product = explode(",", $products);
+  $order = $wrapper->value();
+  foreach ($order->commerce_line_items[LANGUAGE_NONE] as $line_item) {
+    $line_items = commerce_line_item_load($line_item['line_item_id']);
+    $sku = $line_items->line_item_label;
+    if (in_array($sku, $product)) {
+      
+      $quantity = $line_items->quantity;
+      if (($operator == '==') && ($quantity == $qty)) {
+	return TRUE;
+      }
+
+      if (($operator == '<=') && ($quantity <= $qty)) {
+	return TRUE;
+      }
+
+      if (($operator == '>=') && ($quantity >= $qty)) {
+	return TRUE;
+      }
+    }
+  }
+  return FALSE;
+}

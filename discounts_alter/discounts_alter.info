@@ -1,0 +1,4 @@
+name = Discounts Alter
+description = Alter the core functionality of the Discounts.
+core = 7.x
+
